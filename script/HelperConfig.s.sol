@@ -41,8 +41,8 @@ contract HelperConfig is Script {
         tokens[1] = address(wbtcMock);
 
         address[] memory priceFeeds = new address[](2);
-        priceFeeds[0] = address(new CustomMockAggregatorV3(3000e18));
-        priceFeeds[1] = address(new CustomMockAggregatorV3(60000e18));
+        priceFeeds[0] = address(new CustomMockAggregatorV3(3000e8));
+        priceFeeds[1] = address(new CustomMockAggregatorV3(60000e8));
         string memory selector = "ANVIL_PK";
         vm.stopBroadcast();
         config = NetworkConfig({tokensAllowed: tokens, priceFeeds: priceFeeds, pkSelector: selector});

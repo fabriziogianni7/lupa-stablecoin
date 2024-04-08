@@ -20,10 +20,10 @@ contract TestLupa is Test {
     address public TEST_USER = address(1);
     address public LIQUIDATOR = address(2);
     uint256 public constant STARTING_USER_BALANCE = 10 ether;
-    uint256 public constant DEPOSIT_WETH = 1 ether;
+    uint256 public constant DEPOSIT_WETH_WEI = 1 ether;
+    uint256 private constant LUPA_MINT_AMOUNT = 1500 ether;
     uint256 private constant ADDITIONAL_FEED_PRECISION = 1e10;
     uint256 private constant PRECISION = 1e18;
-    uint256 private constant MINT_AMOUNT = 100 ether;
 
     event LupaMinted(address indexed to, uint256 indexed amount);
     event TokenAdded(address indexed token);
@@ -51,18 +51,18 @@ contract TestLupa is Test {
 
     modifier deposited() {
         vm.startPrank(address(TEST_USER));
-        weth.approve(address(lupaEngine), DEPOSIT_WETH);
-        lupaEngine.depositCollateral(address(weth), DEPOSIT_WETH);
+        weth.approve(address(lupaEngine), DEPOSIT_WETH_WEI);
+        lupaEngine.depositCollateral(address(weth), DEPOSIT_WETH_WEI);
         vm.stopPrank();
         _;
     }
 
     modifier depositedAndMinted() {
         vm.startPrank(address(TEST_USER));
-        weth.approve(address(lupaEngine), DEPOSIT_WETH);
+        weth.approve(address(lupaEngine), DEPOSIT_WETH_WEI);
         vm.expectEmit(true, true, false, false, address(lupaEngine));
-        emit LupaMinted(TEST_USER, MINT_AMOUNT);
-        lupaEngine.depositCollateralAndMintLupa(address(weth), DEPOSIT_WETH, MINT_AMOUNT);
+        emit LupaMinted(TEST_USER, LUPA_MINT_AMOUNT);
+        lupaEngine.depositCollateralAndMintLupa(address(weth), DEPOSIT_WETH_WEI, LUPA_MINT_AMOUNT);
         vm.stopPrank();
         _;
     }
@@ -96,19 +96,18 @@ contract TestLupa is Test {
     }
 
     function testdepositCollateralAndMintLupa() public {
-        uint256 mintAmount = 1000;
         vm.startPrank(address(TEST_USER));
-        weth.approve(address(lupaEngine), DEPOSIT_WETH);
+        weth.approve(address(lupaEngine), DEPOSIT_WETH_WEI);
         vm.expectEmit(true, true, false, false, address(lupaEngine));
-        emit LupaMinted(TEST_USER, mintAmount);
-        lupaEngine.depositCollateralAndMintLupa(address(weth), DEPOSIT_WETH, mintAmount);
+        emit LupaMinted(TEST_USER, LUPA_MINT_AMOUNT);
+        lupaEngine.depositCollateralAndMintLupa(address(weth), DEPOSIT_WETH_WEI, LUPA_MINT_AMOUNT);
         vm.stopPrank();
     }
 
     function testDepositCollateral() public deposited {
         uint256 totValue = lupaEngine.getTotalValueOfCollaterInUSDByUser(TEST_USER);
         (, int256 price,,,) = wethFeed.latestRoundData();
-        uint256 calculatedValue = ((uint256(price) * ADDITIONAL_FEED_PRECISION) * DEPOSIT_WETH) / PRECISION;
+        uint256 calculatedValue = ((uint256(price) * ADDITIONAL_FEED_PRECISION) * DEPOSIT_WETH_WEI) / PRECISION;
         assertEq(totValue, calculatedValue);
     }
 
@@ -122,41 +121,47 @@ contract TestLupa is Test {
     }
 
     function testMintLupa() public deposited {
-        uint256 mintAmount = 500;
         vm.prank(address(TEST_USER));
         vm.expectEmit(true, true, false, false, address(lupaEngine));
-        emit LupaMinted(TEST_USER, mintAmount);
-        lupaEngine.mintLupa(mintAmount);
+        emit LupaMinted(TEST_USER, LUPA_MINT_AMOUNT);
+        lupaEngine.mintLupa(LUPA_MINT_AMOUNT);
     }
 
-    function testMintRevert() public deposited {
-        uint256 mintAmount = 20000 ether;
-        vm.prank(address(TEST_USER));
-        vm.expectRevert(LupaEngine.LupaEngine__HealthFactorIsTooLow.selector);
+    function testMintRevert() public {
+        vm.startPrank(address(TEST_USER));
+        weth.approve(address(lupaEngine), DEPOSIT_WETH_WEI); // 1 ether
+        /**
+         * 1 ETH = 3000 $
+         *     I should be able to mint withot revert up to  1500LN
+         */
+        lupaEngine.depositCollateral(address(weth), DEPOSIT_WETH_WEI);
+        uint256 mintAmount = 2000 ether;
+
+        bytes4 selector = bytes4(keccak256("LupaEngine__HealthFactorIsTooLow(uint256,address)"));
+        vm.expectRevert(abi.encodeWithSelector(selector, 750000000000000000, TEST_USER));
         lupaEngine.mintLupa(mintAmount);
     }
 
     function testRedeemCollateralForLupa() public depositedAndMinted {
         vm.startPrank(address(TEST_USER));
-        lupaStablecoin.approve(address(lupaEngine), MINT_AMOUNT);
+        lupaStablecoin.approve(address(lupaEngine), LUPA_MINT_AMOUNT);
         vm.expectEmit(true, true, false, false, address(lupaEngine));
-        emit Redeemed(TEST_USER, address(weth), DEPOSIT_WETH);
-        lupaEngine.redeemCollateralForLupa(address(weth), MINT_AMOUNT, DEPOSIT_WETH);
+        emit Redeemed(TEST_USER, address(weth), DEPOSIT_WETH_WEI);
+        lupaEngine.redeemCollateralForLupa(address(weth), LUPA_MINT_AMOUNT, DEPOSIT_WETH_WEI);
     }
 
     function testRedeemCollateralForLupaRevertNotEnoughCollateral() public depositedAndMinted {
         vm.startPrank(address(TEST_USER));
-        lupaStablecoin.approve(address(lupaEngine), MINT_AMOUNT);
+        lupaStablecoin.approve(address(lupaEngine), LUPA_MINT_AMOUNT);
         vm.expectRevert(LupaEngine.LupaEngine__NotEnoughCollateral.selector);
-        lupaEngine.redeemCollateralForLupa(address(weth), MINT_AMOUNT, DEPOSIT_WETH + 1);
+        lupaEngine.redeemCollateralForLupa(address(weth), LUPA_MINT_AMOUNT, DEPOSIT_WETH_WEI + 1);
     }
 
     function testRedeemCollateraRevert() public depositedAndMinted {
         vm.startPrank(address(TEST_USER));
-        lupaStablecoin.approve(address(lupaEngine), MINT_AMOUNT);
-        bytes4 selector = bytes4(keccak256("LupaEngine__HealthFactorIsTooLow(uint256)"));
-        vm.expectRevert(abi.encodeWithSelector(selector, 0));
-        lupaEngine.redeemCollateral(address(weth), DEPOSIT_WETH);
+        bytes4 selector = bytes4(keccak256("LupaEngine__HealthFactorIsTooLow(uint256,address)"));
+        vm.expectRevert(abi.encodeWithSelector(selector, 0, address(TEST_USER)));
+        lupaEngine.redeemCollateral(address(weth), DEPOSIT_WETH_WEI);
     }
 
     function testGetTotalValueOfCollaterInUSDByUser() public view {
@@ -171,14 +176,36 @@ contract TestLupa is Test {
 
         weth.mint(address(LIQUIDATOR), 10000 ether);
         weth.approve(address(lupaEngine), type(uint256).max);
-        lupaEngine.depositCollateralAndMintLupa(address(weth), 10000 ether, MINT_AMOUNT);
+        lupaEngine.depositCollateralAndMintLupa(address(weth), DEPOSIT_WETH_WEI + 1 ether, LUPA_MINT_AMOUNT);
 
-        wethFeed.setNewAnswer(1e8);
+        wethFeed.setNewAnswer(2000e8);
 
         lupaStablecoin.approve(address(lupaEngine), type(uint256).max);
 
         vm.expectEmit(true, true, true, false, address(lupaEngine));
-        emit Liquidated(LIQUIDATOR, TEST_USER, address(weth), DEPOSIT_WETH, 100);
-        lupaEngine.liquidateUser(TEST_USER, address(weth), 100);
+        emit Liquidated(LIQUIDATOR, TEST_USER, address(weth), DEPOSIT_WETH_WEI + 1 ether, LUPA_MINT_AMOUNT);
+        lupaEngine.liquidateUser(TEST_USER, address(weth), 1500e18);
+    }
+
+    function testGetHealthFactor() public depositedAndMinted {
+        uint256 hf = lupaEngine.getHealtFactor(TEST_USER);
+        assertEq(hf, 1e18);
+    }
+
+    function testGetHealthFactorNotRevertIfETHPriceChangeAndMintMoreETH() public depositedAndMinted {
+        vm.startPrank(address(LIQUIDATOR));
+
+        weth.mint(address(LIQUIDATOR), 10000 ether);
+        weth.approve(address(lupaEngine), type(uint256).max);
+        lupaEngine.depositCollateralAndMintLupa(address(weth), DEPOSIT_WETH_WEI + 1 ether, LUPA_MINT_AMOUNT);
+
+        wethFeed.setNewAnswer(2000e8);
+
+        uint256 hf = lupaEngine.getHealtFactor(LIQUIDATOR);
+        /**
+         * 1500 * 50 / 100 = 750
+         *     750 *1e18 / 1500e18
+         */
+        assertEq(hf, 1333333333333333333);
     }
 }

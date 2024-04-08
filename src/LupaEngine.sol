@@ -53,7 +53,7 @@ contract LupaEngine is ILupaEngine, Ownable, ReentrancyGuard {
     error LupaEngine__PriceFeedAndTokensAreNotTheSameLength();
     error LupaEngine__TokenNotAllowed();
     error LupaEngine__DepositFailed();
-    error LupaEngine__HealthFactorIsTooLow(uint256 ratio);
+    error LupaEngine__HealthFactorIsTooLow(uint256 ratio, address _user);
     error LupaEngine__MintFailed();
     error LupaEngine__TransferFailed();
     error LupaEngine__NotEnoughCollateral();
@@ -156,7 +156,7 @@ contract LupaEngine is ILupaEngine, Ownable, ReentrancyGuard {
         nonReentrant
     {
         _burnLupa(msg.sender, msg.sender, _lupaAmount);
-        _redeemCollateral(_token, _collateralAmount);
+        _redeemCollateral(_token, _collateralAmount, msg.sender);
     }
 
     /**
@@ -165,20 +165,20 @@ contract LupaEngine is ILupaEngine, Ownable, ReentrancyGuard {
      * @notice if someone is ALMOST undercollateralized, the protocol pays who call this function
      * @notice anuyone can call this function and liquidate the amount of Lupa they want, but if the health factor does not improve, this function revert
      */
-    function liquidateUser(address _user, address _collateralToken, uint256 _amount) external {
+    function liquidateUser(address _user, address _collateralToken, uint256 _amountInWei) external {
         uint256 healthFactor = _calculateHealthFactor(_user);
         if (healthFactor >= MIN_HEALTH_FACTOR) revert LupaEngine__HealthFactorOk(healthFactor);
 
         // calculate amount of collateral to liquidate to the msg.sender + bonus
-        uint256 amountOfCollateralToRedeem = _getTokenAmountFromUSD(_collateralToken, _amount);
+        uint256 amountOfCollateralToRedeem = _getTokenAmountFromUSD(_collateralToken, _amountInWei);
 
         // calculate bonus to liquidator
         uint256 bonus = (amountOfCollateralToRedeem * LIQUIDATION_BONUS) / LIQUIDATION_PRECISION;
 
         // liquidate
-        _burnLupa(msg.sender, _user, _amount);
-        _redeemCollateral(_collateralToken, amountOfCollateralToRedeem + bonus);
-        emit Liquidated(msg.sender, _user, _collateralToken, amountOfCollateralToRedeem + bonus, _amount);
+        _burnLupa(msg.sender, _user, _amountInWei);
+        _redeemCollateral(_collateralToken, amountOfCollateralToRedeem + bonus, _user);
+        emit Liquidated(msg.sender, _user, _collateralToken, amountOfCollateralToRedeem + bonus, _amountInWei);
     }
 
     ////////////////////////////////////
@@ -198,7 +198,7 @@ contract LupaEngine is ILupaEngine, Ownable, ReentrancyGuard {
         isAllowedToken(_token)
         nonReentrant
     {
-        _redeemCollateral(_token, _amount);
+        _redeemCollateral(_token, _amount, msg.sender);
     }
 
     /**
@@ -251,40 +251,40 @@ contract LupaEngine is ILupaEngine, Ownable, ReentrancyGuard {
      */
     function _revertIfHealthFactorIsBroken(address _user) internal view {
         uint256 healthFactor = _calculateHealthFactor(_user);
-        if (healthFactor < MIN_HEALTH_FACTOR) revert LupaEngine__HealthFactorIsTooLow(healthFactor);
+        if (healthFactor < MIN_HEALTH_FACTOR) revert LupaEngine__HealthFactorIsTooLow(healthFactor, _user);
     }
 
     /**
+     *
      * @dev return how close to liquidation a user is
      * if user goes below 1, they can get liquidated
      * @param _user the user we want to calculate the hf for
+     *   @custom:examples
+     *     collateralAdjustedForThreshold:
+     *         total collateral value * Liquidation threshold / 100
+     *         eg
+     *         100$ * 50 / 100 = 50$
+     *
+     *     hf:
+     *         collateralAdjustedForThreshold * PRECISION / totalLupaMinted
+     *         eg (say I have minted 50 LP)
+     *         50 * 1e18 / 50 = 1e18 --> hf is ok!
+     *         eg (say I have minted 50LP for 90$ of ETH)
+     *         collateralAdjustedForThreshold = 90$ * 50/100 = 45$
+     *         hf= 45 * 1e18 / 50 = 45000000000000000000/50 = 9e17 --> hf is low!
      */
     function _calculateHealthFactor(address _user) internal view returns (uint256 ratio) {
         (uint256 totalLunaMinted, uint256 totalCollateralValueDeposited) =
             _getUserTotalLupaMintedAndTotalCollateralValue(_user);
-
         //edge case: if the user has no collateral left, this function fails...
-        if (totalLunaMinted == 0 && totalCollateralValueDeposited == 0) {
+        if (totalLunaMinted == 0) {
             return MIN_HEALTH_FACTOR;
         }
 
-        // ratio = totalCollateralValueDeposited / totalLunaMinted; // NO!
-        /**
-         * lets sea
-         *     we have $100 collateral for 100Lupa. if value of collateral drops we break the system
-         *     you need to set a threshold
-         * create a liquidation threshold LIQUIDATION_THRESHOLD
-         */
         uint256 collateralAdjustedForThreshold =
             (totalCollateralValueDeposited * LIQUIDATION_THRESHOLD) / LIQUIDATION_PRECISION;
-        console.log("totalCollateralValueDeposited %s", totalCollateralValueDeposited);
-        console.log("collateralAdjustedForThreshold %s", collateralAdjustedForThreshold);
-        console.log("totalLunaMinted %s", totalLunaMinted);
 
-        // ($100 * 50 ) =  5000 / 100 = $50 so it's essentially 50/100 --> 1/2 so we half the total coll when comparing with Lupa amount
-        // 50% LIQUIDATION_THRESHOLD means we need to double the collateral
-        uint256 hf = ((collateralAdjustedForThreshold * PRECISION) / totalLunaMinted);
-        console.log("health facotr %s", hf);
+        uint256 hf = ((collateralAdjustedForThreshold) / (totalLunaMinted / PRECISION));
         return hf;
     }
 
@@ -308,13 +308,13 @@ contract LupaEngine is ILupaEngine, Ownable, ReentrancyGuard {
      * @param _token the token to withdraw
      * @param _amount amount to burn
      */
-    function _redeemCollateral(address _token, uint256 _amount) internal {
-        if (s_userCollateral[msg.sender][_token] < _amount) revert LupaEngine__NotEnoughCollateral();
-        s_userCollateral[msg.sender][_token] -= _amount;
+    function _redeemCollateral(address _token, uint256 _amount, address _from) internal {
+        if (s_userCollateral[_from][_token] < _amount) revert LupaEngine__NotEnoughCollateral();
+        s_userCollateral[_from][_token] -= _amount;
         bool success = IERC20(_token).transfer(msg.sender, _amount);
         if (!success) revert LupaEngine__TransferFailed();
 
-        _revertIfHealthFactorIsBroken(msg.sender);
+        _revertIfHealthFactorIsBroken(_from);
         emit Redeemed(msg.sender, _token, _amount);
     }
 
@@ -338,12 +338,18 @@ contract LupaEngine is ILupaEngine, Ownable, ReentrancyGuard {
     function _getValueOfSingleTokenCollateral(address _token, uint256 _amount)
         private
         view
-        returns (uint256 usdValue)
+        returns (uint256 totalValue)
     {
+        uint256 price = _getUsdValueOfToken(_token);
+        totalValue = price * _amount;
+        return totalValue;
+    }
+
+    function _getUsdValueOfToken(address _token) private view returns (uint256 usdValue) {
         address priceFeedAddress = s_priceFeeds[_token];
         AggregatorV3Interface priceFeed = AggregatorV3Interface(priceFeedAddress);
         (, int256 price,,,) = priceFeed.latestRoundData();
-        usdValue = ((uint256(price) * ADDITIONAL_FEED_PRECISION) * _amount) / PRECISION;
+        usdValue = ((uint256(price) * ADDITIONAL_FEED_PRECISION)) / PRECISION;
         return usdValue;
     }
 
@@ -351,7 +357,15 @@ contract LupaEngine is ILupaEngine, Ownable, ReentrancyGuard {
         address priceFeedAddress = s_priceFeeds[_token];
         AggregatorV3Interface priceFeed = AggregatorV3Interface(priceFeedAddress);
         (, int256 price,,,) = priceFeed.latestRoundData();
+
+        // usdAmount need to be in wei
         uint256 collateralAmount = ((_usdAmount * PRECISION) / (uint256(price) * ADDITIONAL_FEED_PRECISION));
+
+        // 1500e18 /2000e18
+
+        /**
+         * 1500 * 1e18 / 2000e8 * 1e10 = 1500 / 2000 = 0.0...
+         */
         return collateralAmount;
     }
 
@@ -365,19 +379,12 @@ contract LupaEngine is ILupaEngine, Ownable, ReentrancyGuard {
         address[] memory allTokens = s_allowedCollateraltokens;
         value = 0;
         for (uint256 i = 0; i < allTokens.length; i++) {
-            value += getValueOfSingleTokenCollateralPerUser(allTokens[i], _user);
+            uint256 tokenAmunt = s_userCollateral[_user][allTokens[i]];
+            if (tokenAmunt > 0) {
+                value += _getValueOfSingleTokenCollateral(allTokens[i], tokenAmunt);
+            }
         }
         return value;
-    }
-
-    function getValueOfSingleTokenCollateralPerUser(address _token, address _user)
-        public
-        view
-        returns (uint256 usdValue)
-    {
-        uint256 tokenAmunt = s_userCollateral[_user][_token];
-        if (tokenAmunt <= 0) return 0;
-        return _getValueOfSingleTokenCollateral(_token, tokenAmunt);
     }
 
     function getLupaAddress() external view returns (address lupa) {
@@ -387,5 +394,65 @@ contract LupaEngine is ILupaEngine, Ownable, ReentrancyGuard {
     /// @notice see ILupaEngine.sol
     function getHealtFactor(address _user) external view returns (uint256) {
         return _calculateHealthFactor(_user);
+    }
+
+    function getUsdValueOfToken(address _token) external view returns (uint256) {
+        return _getUsdValueOfToken(_token);
+    }
+
+    function getUserTotalLupaMintedAndTotalCollateralValue(address _user)
+        external
+        view
+        returns (uint256 totalLunaMinted, uint256 totalCollateralValueDeposited)
+    {
+        return _getUserTotalLupaMintedAndTotalCollateralValue(_user);
+    }
+
+    function getLupaStablecoin() external view returns (LupaStablecoin) {
+        return i_lupaStablecoin;
+    }
+
+    function getHealthFactor() external pure returns (uint256) {
+        return HEALTH_FACTOR;
+    }
+
+    function getAdditionalFeedPrecision() external pure returns (uint256) {
+        return ADDITIONAL_FEED_PRECISION;
+    }
+
+    function getPrecision() external pure returns (uint256) {
+        return PRECISION;
+    }
+
+    function getLiquidationThreshold() external pure returns (uint256) {
+        return LIQUIDATION_THRESHOLD;
+    }
+
+    function getLiquidationBonus() external pure returns (uint256) {
+        return LIQUIDATION_BONUS;
+    }
+
+    function getMinHealthFactor() external pure returns (uint256) {
+        return MIN_HEALTH_FACTOR;
+    }
+
+    function getLiquidationPrecision() external pure returns (uint256) {
+        return LIQUIDATION_PRECISION;
+    }
+
+    function getPriceFeed(address token) external view returns (address) {
+        return s_priceFeeds[token];
+    }
+
+    function getUserCollateral(address user, address token) external view returns (uint256) {
+        return s_userCollateral[user][token];
+    }
+
+    function getLupaMintedByUser(address user) external view returns (uint256) {
+        return s_LupaMintedByUser[user];
+    }
+
+    function getAllowedCollateralTokens() external view returns (address[] memory) {
+        return s_allowedCollateraltokens;
     }
 }
